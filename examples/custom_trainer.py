@@ -35,7 +35,7 @@ from gsplat.compression import PngCompression
 from gsplat.distributed import cli
 from gsplat.optimizers import SelectiveAdam
 from gsplat.rendering import rasterization
-from gsplat.strategy import DefaultStrategy, MCMCStrategy
+from gsplat.strategy import DefaultStrategy, MCMCStrategy, CustomMCMCStrategy
 from gsplat_viewer import GsplatViewer, GsplatRenderTabState
 from nerfview import CameraState, RenderTabState, apply_float_colormap
 
@@ -43,7 +43,7 @@ from nerfview import CameraState, RenderTabState, apply_float_colormap
 @dataclass
 class Config:
     # Disable viewer
-    disable_viewer: bool = False
+    disable_viewer: bool = True
     # Path to the .pt files. If provide, it will skip training and run evaluation only.
     ckpt: Optional[List[str]] = None
     # Name of compression strategy to use
@@ -57,8 +57,11 @@ class Config:
     data_factor: int = 4
     # Directory to save results
     result_dir: str = "results/garden"
-    # Every N images there is a test image
-    test_every: int = 8
+    # Every N images there is a validation image
+    test_every: int = 5
+    # Offset from every N that validation images occur (e.g. 0, 4, 8, 12 or 1, 5, 9, 13)
+    test_every_offset: int = 0
+
     # Random crop size for training  (experimental)
     patch_size: Optional[int] = None
     # A global scaler that applies to the scene size related parameters
@@ -77,20 +80,20 @@ class Config:
     steps_scaler: float = 1.0
 
     # Number of training steps
-    max_steps: int = 1000
+    max_steps: int = 7_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [1000])  # TODO: Change number of epochs
+    eval_steps: List[int] = field(default_factory=lambda: [2_000, 7_000])
     # Steps to save the model
-    save_steps: List[int] = field(default_factory=lambda: [1000])  # TODO: Change number of epochs
+    save_steps: List[int] = field(default_factory=lambda: [2_000, 7_000])
     # Whether to save ply file (storage size can be large)
     save_ply: bool = False
     # Steps to save the model as ply
-    ply_steps: List[int] = field(default_factory=lambda: [1000])  # TODO: Change number of epochs
+    ply_steps: List[int] = field(default_factory=lambda: [2_000, 7_000])
     # Whether to disable video generation during training and evaluation
-    disable_video: bool = False
+    disable_video: bool = False  # NOTE: Disable when tuning hyperparameters
 
     # Initialization strategy
-    init_type: str = "sfm"
+    init_type: str = "random"  # NOTE: random or sfm
     # Initial number of GSs. Ignored if using sfm
     init_num_pts: int = 100_000
     # Initial extent of GSs as a multiple of the camera extent. Ignored if using sfm
@@ -112,7 +115,7 @@ class Config:
     far_plane: float = 1e10
 
     # Strategy for GS densification
-    strategy: Union[DefaultStrategy, MCMCStrategy] = field(
+    strategy: Union[DefaultStrategy, MCMCStrategy, CustomMCMCStrategy] = field(
         default_factory=DefaultStrategy
     )
     # Use packed mode for rasterization, this leads to less memory usage but slightly slower.
@@ -144,6 +147,17 @@ class Config:
     opacity_reg: float = 0.0
     # Scale regularization
     scale_reg: float = 0.0
+    scale_reg_type: str = 'vol'
+
+    # Noise parameters
+    noise_distribution: str = 'levy'
+    noise_location: float = 0.0
+    noise_scale: float = 0.25
+    ppf_min_range: float = 0.0
+    ppf_max_range: float = 0.6
+
+    # Relocation parameters
+    relocation_type: str = 'l1'
 
     # Enable camera optimization.
     pose_opt: bool = False
@@ -201,6 +215,10 @@ class Config:
             strategy.reset_every = int(strategy.reset_every * factor)
             strategy.refine_every = int(strategy.refine_every * factor)
         elif isinstance(strategy, MCMCStrategy):
+            strategy.refine_start_iter = int(strategy.refine_start_iter * factor)
+            strategy.refine_stop_iter = int(strategy.refine_stop_iter * factor)
+            strategy.refine_every = int(strategy.refine_every * factor)
+        elif isinstance(strategy, CustomMCMCStrategy):
             strategy.refine_start_iter = int(strategy.refine_start_iter * factor)
             strategy.refine_stop_iter = int(strategy.refine_stop_iter * factor)
             strategy.refine_every = int(strategy.refine_every * factor)
@@ -331,11 +349,13 @@ class Runner:
         self.writer = SummaryWriter(log_dir=f"{cfg.result_dir}/tb")
 
         # Load data: Training data should contain initial points and colors.
+
         self.parser = Parser(
             data_dir=cfg.data_dir,
             factor=cfg.data_factor,
             normalize=cfg.normalize_world_space,
             test_every=cfg.test_every,
+            test_every_offset=cfg.test_every_offset,
         )
         self.trainset = Dataset(
             self.parser,
@@ -382,6 +402,9 @@ class Runner:
                 scene_scale=self.scene_scale
             )
         elif isinstance(self.cfg.strategy, MCMCStrategy):
+            self.strategy_state = self.cfg.strategy.initialize_state()
+        elif isinstance(self.cfg.strategy, CustomMCMCStrategy):
+            self.cfg.strategy.initialize_from_config(self.cfg)
             self.strategy_state = self.cfg.strategy.initialize_state()
         else:
             assert_never(self.cfg.strategy)
@@ -680,8 +703,11 @@ class Runner:
             )
 
             # loss
-            # TODO: Figure out what for colors and pixels take (probably expected and actual, HxW)
-            l1loss = F.l1_loss(colors, pixels)  # TODO: Add per-pixel L1 loss to strategy_state?
+            l1loss = F.l1_loss(colors, pixels)
+
+            # Per-pixel loss (uses mean, like l1_loss does when reduction parameter not specified)
+            pixelL1Loss = torch.mean(torch.abs(colors - pixels), axis = 3).squeeze(0)
+
             ssimloss = 1.0 - fused_ssim(
                  colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2), padding="valid"
             )
@@ -713,7 +739,14 @@ class Runner:
             if cfg.opacity_reg > 0.0:
                 loss += cfg.opacity_reg * torch.sigmoid(self.splats["opacities"]).mean()
             if cfg.scale_reg > 0.0:
-                loss += cfg.scale_reg * torch.exp(self.splats["scales"]).mean()
+                if cfg.scale_reg_type == 'vol':
+                    scaleX = self.splats['scales'][:, 0]
+                    scaleY = self.splats['scales'][:, 1]
+                    scaleZ = self.splats['scales'][:, 2]
+
+                    loss += cfg.scale_reg * torch.exp(scaleX + scaleY + scaleZ).mean()  # e^x * e^y * e^z = e^(x + y + z)
+                else:
+                    loss += cfg.scale_reg * torch.exp(self.splats["scales"]).mean()
 
             loss.backward()
 
@@ -873,9 +906,21 @@ class Runner:
                 self.cfg.strategy.step_post_backward(
                     params=self.splats,
                     optimizers=self.optimizers,
-                    state=self.strategy_state,  # TODO: Add per-pixel L1 loss?
+                    state=self.strategy_state,
                     step=step,
-                    info=info,  # TODO: info['means2d'] should be pixel locations? u,v in [0,1]?
+                    info=info,
+                    lr=schedulers[0].get_last_lr()[0],
+                )
+            elif isinstance(self.cfg.strategy, CustomMCMCStrategy):
+
+                self.strategy_state['pixelL1Loss'] = pixelL1Loss
+
+                self.cfg.strategy.step_post_backward(
+                    params=self.splats,
+                    optimizers=self.optimizers,
+                    state=self.strategy_state,
+                    step=step,
+                    info=info,  # NOTE: info['means2d'] should be pixel locations
                     lr=schedulers[0].get_last_lr()[0],
                 )
             else:
@@ -1219,6 +1264,17 @@ if __name__ == "__main__":
                 opacity_reg=0.01,
                 scale_reg=0.01,
                 strategy=MCMCStrategy(verbose=True),
+            ),
+        ),
+        "custom": (
+            "Custom MCMC strategy",
+            Config(
+                init_opa=0.5,
+                init_scale=0.1,
+                opacity_reg=0.01,
+                scale_reg=0.01,
+                scale_reg_type='vol',
+                strategy=CustomMCMCStrategy(verbose=True),
             ),
         ),
     }

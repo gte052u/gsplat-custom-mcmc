@@ -62,11 +62,13 @@ class Parser:
         factor: int = 1,
         normalize: bool = False,
         test_every: int = 8,
+        test_every_offset: int = 0,
     ):
         self.data_dir = data_dir
         self.factor = factor
         self.normalize = normalize
         self.test_every = test_every
+        self.test_every_offset = test_every_offset
 
         colmap_dir = os.path.join(data_dir, "sparse/0/")
         if not os.path.exists(colmap_dir):
@@ -364,9 +366,9 @@ class Dataset:
         self.load_depths = load_depths
         indices = np.arange(len(self.parser.image_names))
         if split == "train":
-            self.indices = indices[indices % self.parser.test_every != 0]
+            self.indices = indices[(indices + self.parser.test_every_offset) % self.parser.test_every != 0]
         else:
-            self.indices = indices[indices % self.parser.test_every == 0]
+            self.indices = indices[(indices + self.parser.test_every_offset) % self.parser.test_every == 0]
 
     def __len__(self):
         return len(self.indices)

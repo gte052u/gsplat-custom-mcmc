@@ -1,0 +1,62 @@
+# Install Visual Studio. Manual installs of python packages from source seem to use the cl compiler bundled with Visual Studio.
+# Install CUDA 12.9
+
+# MSVC version 19.44.35226
+# C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64
+
+cd C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build
+vcvars64.bat
+set DISTUTILS_USE_SDK=1
+
+# Create conda environment and add PyTorch to it.
+conda env create -f environment.yml
+conda activate gsplat-custom-mcmc
+pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu129
+
+# Install fused-ssim manually.
+cd ..
+git clone https://github.com/rahul-goel/fused-ssim.git
+cd fused-ssim
+git checkout 328dc9836f513d00c4b5bc38fe30478b4435cbb5
+python setup.py install
+
+# Install fused-bilagrid manually.
+cd ..
+git clone https://github.com/harry7557558/fused-bilagrid
+cd fused-bilagrid
+git checkout 90f9788e57d3545e3a033c1038bb9986549632fe
+python setup.py install
+
+# Install the reset of requirements.txt
+cd ..
+cd gsplat-custom-mcmc
+pip install -r examples/requirements.txt
+
+# Install GSplat, with our modifications. (This takes a long while, since it has to compile multiple CUDA files.)
+python setup.py install
+
+pip install jaxtyping
+pip install git+https://github.com/rmbrualla/pycolmap@cc7ea4b7301720ac29287dbe450952511b32125e
+
+##########
+# Change these to Q
+  File "C:\Users\Cael K\.conda\envs\gsplat-custom-mcmc\lib\site-packages\pycolmap\scene_manager.py", line 102, in _load_cameras_bin
+    num_cameras = struct.unpack('L', f.read(8))[0]
+struct.error: unpack requires a buffer of 4 bytes
+  File "C:\Users\Cael K\.conda\envs\gsplat-custom-mcmc\lib\site-packages\pycolmap\scene_manager.py", line 105, in _load_cameras_bin
+    camera_id, camera_type, w, h = struct.unpack('IiLL', f.read(24))
+struct.error: unpack requires a buffer of 16 bytes
+  File "C:\Users\Cael K\.conda\envs\gsplat-custom-mcmc\lib\site-packages\pycolmap\scene_manager.py", line 143, in _load_images_bin
+    num_images = struct.unpack('L', f.read(8))[0]
+struct.error: unpack requires a buffer of 4 bytes
+
+    num_cameras = struct.unpack('Q', f.read(8))[0]
+    camera_id, camera_type, w, h = struct.unpack('IiQQ', f.read(24))
+    num_images = struct.unpack('Q', f.read(8))[0]
+    # One more
+##########
+
+pip install pip_system_certs
+
+# Run the custom trainer.
+python examples/custom_trainer.py custom --data-dir examples/data/360_v2/counter/ --data-factor 4 --result-dir ./examples/results/counter/ --init-type random --scale_reg 0.01 --scale-reg-type mean --noise-distribution levy --relocation-type opacity --noise-location 0.0 --noise-scale 0.8 --ppf-min-range 0.2 --ppf-max-range 1.0 --test-every 4 --test-every-offset 0

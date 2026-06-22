@@ -1,0 +1,42 @@
+name: gsplat-custom-mcmc
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python = 3.9
+  - pytest
+  - pyyaml
+  - pip
+  - jupyter
+  - ipympl
+  - pip:
+    - --extra-index-url https://download.pytorch.org/whl/cu129
+    - argparse
+    - Pillow
+    - imageio[ffmpeg]
+    - matplotlib
+    - ninja
+    - jaxtyping
+    - opencv-python
+    - scipy
+    - scikit-image
+    - scikit-learn
+    - torch==2.8.0+cu129
+    - torchvision==0.23.0+cu129
+    - torchaudio==2.8.0+cu129
+    - tensorboard
+    - pandas
+    - tqdm
+    - viser
+    - git+https://github.com/gte052u/pycolmap@65481fa863081ba9b68e9c86ef5d0cfc67254c9b
+    - git+https://github.com/nerfstudio-project/nerfview@4538024fe0d15fd1a0e4d760f3695fc44ca72787
+    - numpy<2.0.0
+    - tqdm
+    - torchmetrics[image]
+    - tyro>=0.8.8
+    - tensorboard
+    - tensorly
+    - splines
+    - pip_system_certs
+#    - git+https://github.com/rahul-goel/fused-ssim@328dc9836f513d00c4b5bc38fe30478b4435cbb5
+#    - git+https://github.com/harry7557558/fused-bilagrid@90f9788e57d3545e3a033c1038bb9986549632fe

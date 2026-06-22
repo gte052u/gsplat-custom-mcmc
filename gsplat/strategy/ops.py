@@ -1,5 +1,5 @@
 import numpy as np
-from typing import Callable, Dict, List, Union
+from typing import Any, Callable, Dict, List, Union
 
 import torch
 import torch.nn.functional as F
@@ -9,6 +9,7 @@ from gsplat import quat_scale_to_covar_preci
 from gsplat.relocation import compute_relocation
 from gsplat.utils import normalized_quat_to_rotmat
 
+from scipy.stats import levy
 
 @torch.no_grad()
 def _multinomial_sample(weights: Tensor, n: int, replacement: bool = True) -> Tensor:
@@ -298,6 +299,89 @@ def relocate(
 
 
 @torch.no_grad()
+def relocate_l1(
+        params: Union[Dict[str, torch.nn.Parameter], torch.nn.ParameterDict],
+        optimizers: Dict[str, torch.optim.Optimizer],
+        info: Dict[str, Any],
+        state: Dict[str, Tensor],
+        mask: Tensor,
+        binoms: Tensor,
+        pixelL1Loss: Tensor,
+        min_opacity: float = 0.005,
+):
+    """Inplace relocate some dead Gaussians to the lives ones.
+
+    Args:
+        params: A dictionary of parameters.
+        optimizers: A dictionary of optimizers, each corresponding to a parameter.
+        mask: A boolean mask to indicates which Gaussians are dead.
+    """
+    # support "opacities" with shape [N,] or [N, 1]
+    opacities = torch.sigmoid(params["opacities"])
+
+    dead_indices = mask.nonzero(as_tuple=True)[0]
+#    alive_indices = (~mask).nonzero(as_tuple=True)[0]
+    n = len(dead_indices)
+
+    H, W = pixelL1Loss.size()
+
+    means2d = info['means2d'].round().to(torch.int32).squeeze()
+    medianL1Loss = torch.median(pixelL1Loss)
+
+    opaqueMask = ~mask
+    onScreenMask = (means2d[:, 0] >= 0) & (means2d[:, 0] < H) & (means2d[:, 1] >= 0) & (means2d[:, 1] < W)
+
+    onScreenIndices = onScreenMask.nonzero(as_tuple = True)[0]
+    pixelL1LossIndices = means2d[onScreenIndices].squeeze()
+
+    means2dLosses = torch.zeros(onScreenMask.shape).to(params['means'].device)
+    means2dLosses[onScreenIndices] = pixelL1Loss[pixelL1LossIndices[:, 0], pixelL1LossIndices[:, 1]]
+
+    lossMask = (means2dLosses > 0.0)
+
+    aliveMask = opaqueMask & onScreenMask & lossMask
+    alive_indices = aliveMask.nonzero(as_tuple = True)[0]
+
+    # Sample for new GSs
+    eps = torch.finfo(torch.float32).eps
+#    probs = opacities[alive_indices].flatten()  # ensure its shape is [N,]
+    probs = means2dLosses[alive_indices].flatten()
+
+    max = torch.max(probs[probs < 1.0])
+    probs[probs >= 1.0] = max
+    probs = -torch.log(1 - probs)
+
+    sampled_idxs = _multinomial_sample(probs, n, replacement=True)
+    sampled_idxs = alive_indices[sampled_idxs]
+    new_opacities, new_scales = compute_relocation(
+        opacities=opacities[sampled_idxs],
+        scales=torch.exp(params["scales"])[sampled_idxs],
+        ratios=torch.bincount(sampled_idxs)[sampled_idxs] + 1,
+        binoms=binoms,
+    )
+    new_opacities = torch.clamp(new_opacities, max=1.0 - eps, min=min_opacity)
+
+    def param_fn(name: str, p: Tensor) -> Tensor:
+        if name == "opacities":
+            p[sampled_idxs] = torch.logit(new_opacities)
+        elif name == "scales":
+            p[sampled_idxs] = torch.log(new_scales)
+        p[dead_indices] = p[sampled_idxs]
+        return torch.nn.Parameter(p, requires_grad=p.requires_grad)
+
+    def optimizer_fn(key: str, v: Tensor) -> Tensor:
+        v[sampled_idxs] = 0
+        return v
+
+    # update the parameters and the state in the optimizers
+    _update_param_with_optimizer(param_fn, optimizer_fn, params, optimizers)
+    # update the extra running state
+    for k, v in state.items():
+        if isinstance(v, torch.Tensor):
+            v[sampled_idxs] = 0
+
+
+@torch.no_grad()
 def sample_add(
     params: Union[Dict[str, torch.nn.Parameter], torch.nn.ParameterDict],
     optimizers: Dict[str, torch.optim.Optimizer],
@@ -362,6 +446,51 @@ def inject_noise_to_position(
 
     noise = (
         torch.randn_like(params["means"])
+        * (op_sigmoid(1 - opacities)).unsqueeze(-1)
+        * scaler
+    )
+    noise = torch.einsum("bij,bj->bi", covars, noise)
+    params["means"].add_(noise)
+
+
+@torch.no_grad()
+def inject_noise_to_position_levy(
+    params: Union[Dict[str, torch.nn.Parameter], torch.nn.ParameterDict],
+    optimizers: Dict[str, torch.optim.Optimizer],
+    state: Dict[str, Tensor],
+    scaler: float,
+    noiseParams: Dict[str, Any],
+):
+
+    opacities = torch.sigmoid(params["opacities"].flatten())
+    scales = torch.exp(params["scales"])
+    covars, _ = quat_scale_to_covar_preci(
+        params["quats"],
+        scales,
+        compute_covar=True,
+        compute_preci=False,
+        triu=False,
+    )
+
+    def op_sigmoid(x, k=100, x0=0.995):
+        return 1 / (1 + torch.exp(-k * (x - x0)))
+
+    # Get a random number within the percentage point function range.
+    random = torch.rand_like(params['means'])
+    random = (random * (noiseParams['ppfMaxRange'] - noiseParams['ppfMinRange'])) + noiseParams['ppfMinRange']
+    random = random.cpu()  # Move to CPU so that scipy can use this.
+
+    # Create position offsets.
+    offset = levy.ppf(random, loc = noiseParams['noiseLocation'], scale = noiseParams['noiseScale'])
+
+    # Generate random signs (positive/negative), since Levy distribution is positive only.
+    signs = torch.where(torch.rand_like(params['means']) < 0.5, -1.0, 1.0)
+
+    # Combine signs with position offsets, move back to GPU.
+    offset = signs * torch.from_numpy(offset).to(torch.float).to(params['means'].device)
+
+    noise = (
+        offset
         * (op_sigmoid(1 - opacities)).unsqueeze(-1)
         * scaler
     )

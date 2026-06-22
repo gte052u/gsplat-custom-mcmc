@@ -1,99 +1,109 @@
-# gsplat
+# GSplat Custom Markov Chain Monte Carlo
 
-[![Core Tests.](https://github.com/nerfstudio-project/gsplat/actions/workflows/core_tests.yml/badge.svg?branch=main)](https://github.com/nerfstudio-project/gsplat/actions/workflows/core_tests.yml)
-[![Docs](https://github.com/nerfstudio-project/gsplat/actions/workflows/doc.yml/badge.svg?branch=main)](https://github.com/nerfstudio-project/gsplat/actions/workflows/doc.yml)
+[Read what this is about! (link)](https://raw.githubusercontent.com/gte052u/gsplat-custom-mcmc/refs/heads/main/gsplat-custom-mcmc.pdf)
 
-[http://www.gsplat.studio/](http://www.gsplat.studio/)
+Alternatively, [browse to the PDF using Github (gsplat-custom-mcmc.pdf)](https://github.com/gte052u/gsplat-custom-mcmc/blob/main/gsplat-custom-mcmc.pdf).
 
-gsplat is an open-source library for CUDA accelerated rasterization of gaussians with python bindings. It is inspired by the SIGGRAPH paper [3D Gaussian Splatting for Real-Time Rendering of Radiance Fields](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/), but we’ve made gsplat even faster, more memory efficient, and with a growing list of new features! 
+----
 
-<div align="center">
-  <video src="https://github.com/nerfstudio-project/gsplat/assets/10151885/64c2e9ca-a9a6-4c7e-8d6f-47eeacd15159" width="100%" />
-</div>
+A lot of this is third party GSplat code, which we modified.
+We did notice a bug in a third-party GSplat dependency (a fork from an old version of pycolmap),
+and have had to make some corrections. Our corrections are already in the environment.yml file.
 
-## News
+You can find installation instructions in [INSTALL.md](INSTALL.md).
+It's mostly getting Miniconda to install stuff automatically, then what to do to get around some problems we encountered.
+The installation contains the most recent record of what worked for us, which was on Windows 11.
+While this was originally run on a RHEL computing cluster, we unfortunately no longer have access to it.
 
-[May 2025] Arbitrary batching (over multiple scenes and multiple viewpoints) is supported now!! Checkout [here](docs/batch.md) for more details! Kudos to [Junchen Liu](https://junchenliu77.github.io/).
+Since this repository has modified GSplat'd code, it will need to be compiled as a pip package locally.
+It will show up in the dependency logs as GSplat 1.5.3, though to be clear this is where our implementation started development from.
 
-[May 2025] [Jonathan Stephens](https://x.com/jonstephens85) makes a great [tutorial video](https://www.youtube.com/watch?v=ACPTiP98Pf8) for Windows users on how to install gsplat and get start with 3DGUT.
+Since the Mip-NeRF 360 dataset is very large, it is not included in the repository.
+It can be downloaded from https://jonbarron.info/mipnerf360/.
 
-[April 2025] [NVIDIA 3DGUT](https://research.nvidia.com/labs/toronto-ai/3DGUT/) is now integrated in gsplat! Checkout [here](docs/3dgut.md) for more details. [[NVIDIA Tech Blog]](https://developer.nvidia.com/blog/revolutionizing-neural-reconstruction-and-rendering-in-gsplat-with-3dgut/) [[NVIDIA Sweepstakes]](https://www.nvidia.com/en-us/research/3dgut-sweepstakes/)
+During development, we used `gsplat/examples/data/360_v2` as the base Mip-NeRF 360 directory.
+As an example, this would put the counter scene in `gsplat/examples/data/360_v2/counter`, and it would contain the directories `images`, `images_2`, `sparse`, and such.
 
-## Installation
+## Running
 
-**Dependence**: Please install [Pytorch](https://pytorch.org/get-started/locally/) first.
+### Command Line
 
-The easiest way is to install from PyPI. In this way it will build the CUDA code **on the first run** (JIT).
+`custom_trainer.py` accepts a number of command line arguments. Some were added by us, though most of them came with base GSplat.
 
-```bash
-pip install gsplat
-```
+To use our implementation, start the command with `python custom_trainer.py custom`, then add your arguments afterwards.
+To use the default GS-MCMC method, start with `python custom_trainer.py mcmc`, then add whatever arguments you need.
 
-Alternatively you can install gsplat from source. In this way it will build the CUDA code during installation.
+#### Base GSplat options
+* `data-dir` - Location of the scene to render
+* `results-dir` - Directory to place the results, including statistics files and video renders
+* `init-type` - `random` or `sfm` (if you have SfM data to initialize with). We used `random`.
 
-```bash
-pip install git+https://github.com/nerfstudio-project/gsplat.git
-```
+#### Options added for our implementation
+* `scale-reg` - Scaling regularization coefficient. `0.025` was our value, `0.01` was used by GS-MCMC
+* `scale-reg-type` - `vol` for our implementation, `mean` for default GS-MCMC scale regularization
+* `noise-distribution` - `levy` for our implementation, `gaussian` for default GS-MCMC's distribution
+* `noise-location` - Offset applied to the Levy distribution. `0.0` was our value.
+* `noise-scale` - Scale of the Levy distribution. `0.8` was our value.
+* `ppf-min-range` - Minimum range of the Levy distribution (from 0.0 to 1.0) to allow numbers from. `0.0` was our value.
+* `ppf-max-range` - Maximum range of the Levy distribution (from 0.0 to 1.0) to allow numbers from. `0.9` was our value, which threw out the last 10% of the distribution.
+* `relocation-type` - `l1` for our implementation, `opacity` for default GS-MCMC.
+* `test-every` - Accepts a number K. Technically, every K images is used for validation.
+* `test-every-offset` - Accepts a number N. This shifts when exactly every K image is pulled for validation. Useful for K-folds.
 
-We also provide [pre-compiled wheels](https://docs.gsplat.studio/whl) for both linux and windows on certain python-torch-CUDA combinations (please check first which versions are supported). Note this way you would have to manually install [gsplat's dependencies](https://github.com/nerfstudio-project/gsplat/blob/6022cf45a19ee307803aaf1f19d407befad2a033/setup.py#L115). For example, to install gsplat for pytorch 2.0 and cuda 11.8 you can run
-```
-pip install ninja numpy jaxtyping rich
-pip install gsplat --index-url https://docs.gsplat.studio/whl/pt20cu118
-```
-
-To build gsplat from source on Windows, please check [this instruction](docs/INSTALL_WIN.md).
-
-## Evaluation
-
-This repo comes with a standalone script that reproduces the official Gaussian Splatting with exactly the same performance on PSNR, SSIM, LPIPS, and converged number of Gaussians. Powered by gsplat’s efficient CUDA implementation, the training takes up to **4x less GPU memory** with up to **15% less time** to finish than the official implementation. Full report can be found [here](https://docs.gsplat.studio/main/tests/eval.html).
-
-```bash
-cd examples
-pip install -r requirements.txt
-# download mipnerf_360 benchmark data
-python datasets/download_dataset.py
-# run batch evaluation
-bash benchmarks/basic.sh
-```
-
-## Examples
-
-We provide a set of examples to get you started! Below you can find the details about
-the examples (requires to install some exta dependencies via `pip install -r examples/requirements.txt`)
-
-- [Train a 3D Gaussian splatting model on a COLMAP capture.](https://docs.gsplat.studio/main/examples/colmap.html)
-- [Fit a 2D image with 3D Gaussians.](https://docs.gsplat.studio/main/examples/image.html)
-- [Render a large scene in real-time.](https://docs.gsplat.studio/main/examples/large_scale.html)
-
-
-## Development and Contribution
-
-This repository was born from the curiosity of people on the Nerfstudio team trying to understand a new rendering technique. We welcome contributions of any kind and are open to feedback, bug-reports, and improvements to help expand the capabilities of this software.
-
-This project is developed by the following wonderful contributors (unordered):
-
-- [Angjoo Kanazawa](https://people.eecs.berkeley.edu/~kanazawa/) (UC Berkeley): Mentor of the project.
-- [Matthew Tancik](https://www.matthewtancik.com/about-me) (Luma AI): Mentor of the project.
-- [Vickie Ye](https://people.eecs.berkeley.edu/~vye/) (UC Berkeley): Project lead. v0.1 lead.
-- [Matias Turkulainen](https://maturk.github.io/) (Aalto University): Core developer.
-- [Ruilong Li](https://www.liruilong.cn/) (UC Berkeley): Core developer. v1.0 lead.
-- [Justin Kerr](https://kerrj.github.io/) (UC Berkeley): Core developer.
-- [Brent Yi](https://github.com/brentyi) (UC Berkeley): Core developer.
-- [Zhuoyang Pan](https://panzhy.com/) (ShanghaiTech University): Core developer.
-- [Jianbo Ye](http://www.jianboye.org/) (Amazon): Core developer.
-
-We also have a white paper with about the project with benchmarking and mathematical supplement with conventions and derivations, available [here](https://arxiv.org/abs/2409.06765). If you find this library useful in your projects or papers, please consider citing:
+After hyperparameter tuning was complete, our command became:
 
 ```
-@article{ye2025gsplat,
-  title={gsplat: An open-source library for Gaussian splatting},
-  author={Ye, Vickie and Li, Ruilong and Kerr, Justin and Turkulainen, Matias and Yi, Brent and Pan, Zhuoyang and Seiskari, Otto and Ye, Jianbo and Hu, Jeffrey and Tancik, Matthew and Angjoo Kanazawa},
-  journal={Journal of Machine Learning Research},
-  volume={26},
-  number={34},
-  pages={1--17},
-  year={2025}
-}
+python examples/custom_trainer.py custom \
+  --data-dir examples/data/360_v2/counter \
+  --data-factor 4 \
+  --result-dir ./examples/results/counter \
+  --init-type random \
+  --scale-reg-type vol \
+  --scale_reg 0.025 \
+  --noise-distribution levy \
+  --noise-location 0.0 \
+  --noise-scale 0.8 \
+  --ppf-min-range 0.0 \
+  --ppf-max-range 0.9 \
+  --relocation-type l1 \
+  --test-every 4 \
+  --test-every-offset 0
 ```
 
-We welcome contributions of any kind and are open to feedback, bug-reports, and improvements to help expand the capabilities of this software. Please check [docs/DEV.md](docs/DEV.md) for more info about development.
+### Epoch settings (custom_trainer.py)
+
+The number of epochs to run for, as well as when to temporarily pause training and run evaluation, were set in `custom_trainer.py` as default values in configuration.
+This is from base GSplat, and we only changed numbers, though presumably there should be options for these as well.
+We did not experiment with them, but `--max-steps`, `--eval-steps`, `disable-video`, and the like should do it.
+
+```
+    # Number of training steps
+    max_steps: int = 7_000  # Total number of epochs to run
+    # Steps to evaluate the model
+    eval_steps: List[int] = field(default_factory=lambda: [2_000, 7_000])  # Training will pause at these epochs to run validation statistics
+    # Steps to save the model
+    save_steps: List[int] = field(default_factory=lambda: [2_000, 7_000])  # Training will pause to save the model at these epochs
+    # Whether to save ply file (storage size can be large)
+    save_ply: bool = False
+    # Steps to save the model as ply
+    ply_steps: List[int] = field(default_factory=lambda: [2_000, 7_000])   # Training will pause to save the gaussians and their properties at these epochs
+    # Whether to disable video generation during training and evaluation
+    disable_video: bool = False  # TODO: Disable when tuning hyperparameters
+```
+
+## Files
+
+* `environment.yml` - Conda environment file for 3d scene reconstruction.
+* `sample_command.py` - Notes on the command that was run on the initial Mip-NeRF 360 scene.
+* `custom_command.sh` - Example of using the custom trainer, though it should be noted this does not reflect our final hyperparameters.
+* `overwrite-strategy.sh` - Convenience function to move modifications to Miniforge directly, to avoid having to recompile the entire implementation as a pip package for every change.
+* `results-final-7000.mp4` - Video file of a run after hyperparameter tuning was complete.
+* `tuning-relocation.sh` - Sample script file used for hyperparameter tuning. (Was modified for each batch of runs.)
+* `tuning-scale.sh` - Sample script file used for hyperparameter tuning. (Was modified for each batch of runs.)
+* `tuning.sh` - Sample script file used for hyperparameter tuning. (Was modified for each batch of runs.)
+* `tuning2.sh` - Sample script file used for hyperparameter tuning. (Was modified for each batch of runs.)
+* `/examples/custom_trainer.py` - Modified from simple_trainer.py. Contains extra code for our input parameters and so it can use our MCMC strategy. Includes a modification for gaussian size regularization.
+* `/examples/datasets/colmap.py` - Modified to include a parameter for K-folds cross validation.
+* `/gsplat/strategy/__init__.py` - Some modifications to register our Python files with GSplat.
+* `/gsplat/strategy/custom.py` - Our implementation of Gaussian Splatting Markov Chain Monte Carlo, which is a copy of the regular MCMC strategy with some modifications.
+* `/gsplat/strategy/ops.py` - Some functions for Levy-Distributed Langevin Dynamics and L1 Loss Relocation were added.
